@@ -1,0 +1,19 @@
+Basic Concepts of Set Theory: Definitions, Inclusion, Equality of Sets, Cartesian product, The Power Set, Some operations on Sets, Venn Diagrams, Some Basic Set Identities.
+
+Functions: Introduction, definition, co-domain, range, image, value of a function, surjective, injective, bijective, inverse function, composition of functions.
+
+ 
+
+Counting: The Basics of Counting, The Pigeonhole Principle, generalized Pigeonhole Principle, Principle of Inclusion Exclusion, Principle of mathematical induction.
+
+ 
+
+Recurrence Relation: Introduction, Recursion, Recurrence Relation, Solving linear nonhomogeneous and homogeneous recurrence relation with constant coefficients.
+
+ 
+
+Relations: Definition, Binary Relation, Representation, Domain, Range, Universal Relation, Void Relation, Union, Intersection, and Complement Operations on Relations, Relation matrix and graph of a relation; Properties of Binary Relations in a Set: Reflexive, Symmetric, Transitive, Anti-symmetric Relations, Equivalence Relation, Partition, Equivalence Classes. Partial
+
+ 
+
+Ordering: Definition, Examples, Simple or Linear Ordering, Totally Ordered Set (Chain), Hasse Diagrams, Least and Greatest Members, Minimal and Maximal Members, Lattice as Poset.
