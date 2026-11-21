@@ -1,238 +1,253 @@
 /*
   Week 10 Capstone: Obstacle Avoiding Line Follower (AlphaBot2)
-  - Start delay, then follow the white line with PD control
-  - Junction (3+ sensors white): obstacle ahead -> take branch, clear -> go straight
-  - LEDs show IR1, IR2, IR4, IR5: red = white, green = black
-  - END (all 5 white): stop, beep 3 times
+
+  What the robot does, in plain words:
+  - Waits 4 seconds after you switch it on.
+  - Drives along the white line on the black floor.
+  - Where the road splits, it looks ahead:
+      something in the way -> it turns onto the side road
+      nothing in the way   -> it keeps going straight
+  - Its 4 lights show what the floor sensors see: red = white, green = black.
+  - When every floor sensor sees white, it has reached the END box:
+    it stops and beeps 3 times.
 */
 
 ////////////////////////////////////////////////////////////////////////////////
-                              //CODE STARTS
+//CODE STARTS
 
 
 // ================= LIBRARIES =================
-#include <IRArray.h>            // 5 IR line sensors
-#include <Wire.h>               // I2C bus (for PCF8574)
-#include <Adafruit_PCF8574.h>   // I/O expander; buzzer is on it
-#include <Adafruit_NeoPixel.h>  // 4 RGB LEDs
+// Libraries are ready-made code written by someone else, so we don't have to.
+#include <IRArray.h>            // lets us read the 5 floor sensors
+#include <Wire.h>               // lets the Arduino talk to other chips using 2 wires
+#include <Adafruit_PCF8574.h>   // lets us control the small chip the beeper is plugged into
+#include <Adafruit_NeoPixel.h>  // lets us control the 4 coloured lights
 
 
 // ================= PIN DEFINITIONS =================
-#define TRIG_PIN  3     // ultrasonic: sends pulse
-#define ECHO_PIN  2     // ultrasonic: receives echo
-#define NUM_LEDS 4      // LED count
-#define LED_PIN 7       // one data pin drives all 4 LEDs
-#define AIN1   A0       // left motor direction
-#define AIN2   A1       // left motor direction
-#define PWMA   6        // left motor speed (PWM)
-#define BIN1   A3       // right motor direction
-#define BIN2   A2       // right motor direction
-#define PWMB   5        // right motor speed (PWM)
-#define BUZZER_PIN  5   // pin P5 on the PCF8574, not Arduino pin 5
+// A "pin" is a metal leg on the Arduino that a wire connects to.
+// Here we give each pin an easy name, so the code says what it means.
+#define TRIG_PIN 3    // tells the distance sensor to make a sound
+#define ECHO_PIN 2    // hears the sound come back
+#define NUM_LEDS 4    // there are 4 coloured lights
+#define LED_PIN 7     // the one wire that controls all 4 lights
+#define AIN1 A0       // left wheel: which way to spin (part 1)
+#define AIN2 A1       // left wheel: which way to spin (part 2)
+#define PWMA 6        // left wheel: how fast
+#define BIN1 A3       // right wheel: which way to spin (part 1)
+#define BIN2 A2       // right wheel: which way to spin (part 2)
+#define PWMB 5        // right wheel: how fast
+#define BUZZER_PIN 5  // the beeper (on the helper chip, not on the Arduino itself)
 
 
-// ================= CONSTANTS =================
-#define THRESHOLD    900        // reading > this = white
-#define BASE_SPEED   50         // cruising speed (0-255)
-#define MAX_SPEED    50         // speed limit per wheel
-#define OBSTACLE_DISTANCE  25   // cm; closer = obstacle
+// ================= SETTINGS =================
+#define THRESHOLD 959         // floor sensor number above this = white, below = black
+#define BASE_SPEED 65         // normal speed (0 = stopped, 255 = full speed)
+#define MAX_SPEED 120         // top speed a wheel is allowed
+#define OBSTACLE_DISTANCE 25  // something closer than 25 cm = road is blocked
 
 
-// ================= TUNING =================
-float Kp = 20.0;    // P gain: steer harder the further off the line
-float Kd = 395.0;   // D gain: damps wobble
+// ================= STEERING SETTINGS =================
+float Kp = 24.0;   // how hard to steer back when the robot is off the line
+float Kd = 371.0;  // calms the steering down so the robot doesn't wobble
 
 
-// ================= OBJECTS =================
-IRArray ir;                       // line sensors
-unsigned int sensorValues[5];     // readings 0-1023; [0] = IR1 ... [4] = IR5
-Adafruit_PCF8574 pcf;             // buzzer chip
-Adafruit_NeoPixel RGB = Adafruit_NeoPixel(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);   // LED strip
+// ================= THINGS WE USE =================
+IRArray ir;                                                                          // the floor sensors
+unsigned int sensorValues[5];                                                        // 5 boxes holding what each floor sensor sees (bigger = brighter)
+Adafruit_PCF8574 pcf;                                                                // the helper chip with the beeper
+Adafruit_NeoPixel RGB = Adafruit_NeoPixel(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);  // the 4 lights
 
 
-// ================= VARIABLES =================
-int   weights[5] = { 2, 1, 0, -1, -2 };   // sensor position scores; 0 = centre
-float lastKnownError = 0;   // last error while line was visible
-float previousError  = 0;   // last loop's error, for the D term
+// ================= THINGS THE ROBOT REMEMBERS =================
+int weights[5] = { 2, 1, 0, -1, -2 };  // a score for where each sensor sits: middle = 0, edges = 2 or -2
+float lastKnownError = 0;              // where the line was the last time we saw it
+float previousError = 0;               // where the line was a moment ago
 
 
-// ================= MOVEMENT FUNCTIONS =================
-// Both wheels forward at their own speeds; robot turns toward the slower one.
+// ================= WHEELS =================
+// Makes both wheels roll forward, each at its own speed.
+// Same speed = straight. Different speeds = the robot turns toward the slower wheel.
 void moveForward(int leftSpeed, int rightSpeed) {
-  digitalWrite(AIN1, HIGH);        // left: HIGH + LOW = forward
-  digitalWrite(AIN2, LOW);
-  analogWrite(PWMA, leftSpeed);    // left speed
+  digitalWrite(AIN1, HIGH);      // these two lines make the left wheel
+  digitalWrite(AIN2, LOW);       // spin forward
+  analogWrite(PWMA, leftSpeed);  // set the left wheel's speed
 
-  digitalWrite(BIN1, HIGH);        // right: HIGH + LOW = forward
-  digitalWrite(BIN2, LOW);
-  analogWrite(PWMB, rightSpeed);   // right speed
+  digitalWrite(BIN1, HIGH);       // these two lines make the right wheel
+  digitalWrite(BIN2, LOW);        // spin forward
+  analogWrite(PWMB, rightSpeed);  // set the right wheel's speed
 }
 
-// Both wheels off.
+// Stops both wheels.
 void stopMotors() {
-  digitalWrite(AIN1, LOW);
+  digitalWrite(AIN1, LOW);  // left wheel: no direction
   digitalWrite(AIN2, LOW);
-  analogWrite(PWMA, 0);
+  analogWrite(PWMA, 0);  // left wheel: speed 0
 
-  digitalWrite(BIN1, LOW);
+  digitalWrite(BIN1, LOW);  // right wheel: no direction
   digitalWrite(BIN2, LOW);
-  analogWrite(PWMB, 0);
+  analogWrite(PWMB, 0);  // right wheel: speed 0
 }
 
 
-// ================= SENSORS & BUZZER =================
-// Distance ahead in cm.
+// ================= DISTANCE SENSOR, BEEPER, LIGHTS =================
+// Finds out how far away the thing in front is, in cm.
+// It works like a bat: make a sound, time how long the echo takes.
 long readDistance() {
-  digitalWrite(TRIG_PIN, LOW);     // clean start
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);    // 10 us pulse = send sound
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(TRIG_PIN, LOW);   // be quiet first
+  delayMicroseconds(2);          // wait a tiny moment
+  digitalWrite(TRIG_PIN, HIGH);  // "shout"...
+  delayMicroseconds(10);         // ...for a tiny moment
+  digitalWrite(TRIG_PIN, LOW);   // stop shouting
 
-  long duration = pulseIn(ECHO_PIN, HIGH, 25000);   // echo time (us); give up after 25 ms
-  if (duration == 0) return 100;                    // no echo = road clear
-  return duration / 58;                             // us -> cm (there and back)
+  long duration = pulseIn(ECHO_PIN, HIGH, 25000);  // time how long the echo takes (give up if too long)
+  if (duration == 0) return 100;                   // no echo = nothing in front, say 100 cm
+  return duration / 58;                            // turn the echo time into cm
 }
 
-// Beep n times. Buzzer is active LOW.
+// Beeps the beeper a number of times.
+// Note: on this robot, LOW turns the beeper ON and HIGH turns it OFF.
 void beepBuzzer(int times) {
-  for (int i = 0; i < times; i++) {
-    pcf.digitalWrite(BUZZER_PIN, LOW);    // ON
-    delay(200);
-    pcf.digitalWrite(BUZZER_PIN, HIGH);   // OFF
-    delay(150);
+  for (int i = 0; i < times; i++) {      // repeat this as many times as asked
+    pcf.digitalWrite(BUZZER_PIN, LOW);   // beeper ON
+    delay(200);                          // wait 0.2 seconds
+    pcf.digitalWrite(BUZZER_PIN, HIGH);  // beeper OFF
+    delay(150);                          // wait 0.15 seconds
   }
 }
 
-// LEDs 0-3 show IR1, IR2, IR4, IR5 (IR3 has no LED).
+// Makes the 4 lights show what 4 of the floor sensors see.
+// (There are 5 sensors but only 4 lights, so the middle sensor gets no light.)
 void updateSensorLEDs() {
-  int displayIndices[4] = {0, 1, 3, 4};   // sensor shown on each LED
-  for (int i = 0; i < 4; i++) {
-    int sensorIdx = displayIndices[i];
+  int displayIndices[4] = { 0, 1, 3, 4 };  // which sensor goes with which light (skip the middle one)
+  for (int i = 0; i < 4; i++) {            // do this for each of the 4 lights
+    int sensorIdx = displayIndices[i];     // find this light's sensor
     if (sensorValues[sensorIdx] > THRESHOLD) {
-      RGB.setPixelColor(i, RGB.Color(255, 0, 0));   // white -> red
+      RGB.setPixelColor(i, RGB.Color(255, 0, 0));  // sensor sees white -> light goes red
     } else {
-      RGB.setPixelColor(i, RGB.Color(0, 255, 0));   // black -> green
+      RGB.setPixelColor(i, RGB.Color(0, 255, 0));  // sensor sees black -> light goes green
     }
   }
-  RGB.show();   // apply colours
+  RGB.show();  // actually turn the lights on with the new colours
 }
 
 
-// ================= ERROR FUNCTION =================
-// Error = average weight of sensors seeing white (0 = centred, sign = side).
-// Line lost -> return last error so the robot keeps turning the same way.
+// ================= WHERE IS THE LINE? =================
+// Gives back a number that says where the white line is under the robot:
+//   0           = line is right in the middle (good, go straight)
+//   bigger/smaller than 0 = line is off to one side (steer back)
+// If no sensor can see the line, it uses the last place the line was seen.
 float readError() {
 
-  ir.read(sensorValues);   // fresh readings
+  ir.read(sensorValues);  // look at the floor with all 5 sensors
 
-  int   whiteCount  = 0;   // sensors on the line
-  float weightedSum = 0;   // sum of their weights
+  int whiteCount = 0;     // how many sensors see the white line
+  float weightedSum = 0;  // add up the scores of those sensors
 
-  for (int i = 0; i < 5; i++) {
-    if (sensorValues[i] > THRESHOLD) {          // white line = high reading
-      weightedSum = weightedSum + weights[i];
-      whiteCount  = whiteCount + 1;
+  for (int i = 0; i < 5; i++) {                // check each sensor, one by one
+    if (sensorValues[i] > THRESHOLD) {         // this sensor sees white
+      weightedSum = weightedSum + weights[i];  // add its score
+      whiteCount = whiteCount + 1;             // count it
     }
   }
 
-  if (whiteCount == 0) {   // line lost
-    return lastKnownError;
+  if (whiteCount == 0) {    // no sensor sees the line (robot drifted off)
+    return lastKnownError;  // use where the line was last time
   }
 
-  lastKnownError = weightedSum / whiteCount;   // average = error; save it
-  return lastKnownError;
+  lastKnownError = weightedSum / whiteCount;  // average score = where the line is; remember it
+  return lastKnownError;                      // give the answer back
 }
 
 
 // ================= SETUP =================
-// Runs once at power-on.
+// This part runs only once, right when you switch the robot on.
 void setup() {
 
-  pinMode(AIN1, OUTPUT);   // motor pins
+  pinMode(AIN1, OUTPUT);  // the wheel wires send orders out
   pinMode(AIN2, OUTPUT);
   pinMode(PWMA, OUTPUT);
   pinMode(BIN1, OUTPUT);
   pinMode(BIN2, OUTPUT);
   pinMode(PWMB, OUTPUT);
 
-  pinMode(TRIG_PIN, OUTPUT);   // ultrasonic: send
-  pinMode(ECHO_PIN, INPUT);    // ultrasonic: listen
+  pinMode(TRIG_PIN, OUTPUT);  // this wire sends the "shout"
+  pinMode(ECHO_PIN, INPUT);   // this wire listens for the echo
 
-  pcf.begin(0x20, &Wire);               // PCF8574 at I2C address 0x20
-  pcf.pinMode(BUZZER_PIN, OUTPUT);
-  pcf.digitalWrite(BUZZER_PIN, HIGH);   // buzzer off
+  pcf.begin(0x20, &Wire);              // connect to the helper chip (0x20 is its address)
+  pcf.pinMode(BUZZER_PIN, OUTPUT);     // the beeper wire sends orders out
+  pcf.digitalWrite(BUZZER_PIN, HIGH);  // make sure the beeper is OFF
 
-  RGB.begin();   // LEDs on, all dark
-  RGB.show();
+  RGB.begin();  // get the lights ready
+  RGB.show();   // start with all lights off
 
-  ir.begin();    // line sensors on
+  ir.begin();  // get the floor sensors ready
 
-  stopMotors();
+  stopMotors();  // make sure the wheels are not moving
 
-  delay(4000);   // start delay: place robot, step away, start recording
+  delay(4000);  // wait 4 seconds so you can put the robot down, walk away and start the camera
 }
 
 
 // ================= LOOP =================
-// Repeats forever: sense -> decide -> drive.
+// This part repeats again and again, very fast, until the robot is switched off.
+// Each time: look at the floor -> decide what to do -> move the wheels.
 void loop() {
 
-  // 1. Where is the line?
+  // 1. Find where the line is
   float error = readError();
 
-  // 2. Show sensors on LEDs
+  // 2. Update the lights
   updateSensorLEDs();
 
-  // 3. Count sensors seeing white
-  int whiteCount = 0;
-  for (int i = 0; i < 5; i++) {
-    if (sensorValues[i] > THRESHOLD) {
-      whiteCount++;
+  // 3. Count how many sensors see white
+  int whiteCount = 0;                   // start counting from 0
+  for (int i = 0; i < 5; i++) {         // check all 5 sensors
+    if (sensorValues[i] > THRESHOLD) {  // this one sees white
+      whiteCount++;                     // add 1 to the count
     }
   }
 
-  // 4. END: all 5 white -> stop, LEDs red, 3 beeps, halt forever
+  // 4. All 5 sensors see white = we are on the white END box. Finish!
   if (whiteCount == 5) {
-    stopMotors();
+    stopMotors();  // stop
     for (int i = 0; i < 4; i++) {
-      RGB.setPixelColor(i, RGB.Color(255, 0, 0));
+      RGB.setPixelColor(i, RGB.Color(255, 0, 0));  // make all lights red
     }
-    RGB.show();
-    beepBuzzer(3);
-    while (1) {        // trap here; robot never moves again
-      stopMotors();
+    RGB.show();      // turn the lights on
+    beepBuzzer(3);   // beep 3 times
+    while (1) {      // stay here forever...
+      stopMotors();  // ...with the wheels stopped, so the robot never moves again
     }
   }
 
-  // 5. Junction: 3+ white (line widens at a branch)
+  // 5. 3 or more sensors see white = the road splits here (a junction)
   if (whiteCount >= 3) {
-    long distance = readDistance();          // look ahead
-    if (distance <= OBSTACLE_DISTANCE) {     // blocked -> take branch
-      // pivot toward the side where IR1/IR2 see white, else the other way
+    long distance = readDistance();       // check: is something in front?
+    if (distance <= OBSTACLE_DISTANCE) {  // yes, the road ahead is blocked -> take the side road
+      // which side is the side road on? check the sensors on one side
       if (sensorValues[0] > THRESHOLD || sensorValues[1] > THRESHOLD) {
-        moveForward(0, BASE_SPEED);          // left wheel stopped -> pivot
+        moveForward(0, BASE_SPEED);  // stop one wheel, keep the other going = turn one way
+      } else {
+        moveForward(BASE_SPEED, 0);  // stop the other wheel = turn the other way
       }
-      else {
-        moveForward(BASE_SPEED, 0);          // right wheel stopped -> pivot
-      }
-      delay(550);                            // turn for 0.55 s (blind, timed)
-      return;                                // restart loop()
+      delay(550);  // keep turning for about half a second
+      return;      // start the loop again from the top
     }
-    // clear -> fall through; PD keeps going straight
+    // nothing in front -> do nothing special, just keep following the line straight
   }
 
-  // 6. PD steering
-  float derivative = error - previousError;              // how fast error changes
-  float correction = (Kp * error) + (Kd * derivative);   // amount to steer
+  // 6. Steer to stay on the line
+  float derivative = error - previousError;             // how quickly the robot is drifting off
+  float correction = (Kp * error) + (Kd * derivative);  // how much to steer to get back
 
-  int leftSpeed  = BASE_SPEED - correction;   // opposite changes on each wheel
-  int rightSpeed = BASE_SPEED + correction;   // -> robot turns toward the line
+  int leftSpeed = BASE_SPEED - correction;   // slow one wheel down...
+  int rightSpeed = BASE_SPEED + correction;  // ...and speed the other up, so the robot turns back onto the line
 
-  leftSpeed  = constrain(leftSpeed,  0, MAX_SPEED);   // clamp to 0..MAX
+  leftSpeed = constrain(leftSpeed, 0, MAX_SPEED);  // don't let the speed go below 0 or above the top speed
   rightSpeed = constrain(rightSpeed, 0, MAX_SPEED);
 
-  moveForward(leftSpeed, rightSpeed);
+  moveForward(leftSpeed, rightSpeed);  // move the wheels at these speeds
 
-  previousError = error;   // save for next loop's D term
+  previousError = error;  // remember where the line was, for next time
 }
